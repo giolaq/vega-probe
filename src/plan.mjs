@@ -12,39 +12,66 @@ export const VEGA_ACTIONS = [
 
 const ACTION_SET = new Set(VEGA_ACTIONS);
 
-export function buildPlanPrompt(description) {
-  return [
-    "You translate a human-written TV remote test into a deterministic Vega test plan.",
-    "Do not execute the test. Return only one JSON object and no markdown.",
-    "",
-    "Allowed actions:",
-    "- up, down, left, right: D-pad directions",
-    "- select: center/OK",
-    "- back: remote Back",
-    "- home: remote Home",
-    "- wait: pause without input",
-    "- observe: capture state without input",
-    "",
-    "Output contract:",
-    '{"name":"short name","steps":[{"action":"right","repeat":2,"pauseMs":350,"expect":"Test & Debug is focused"}]}',
-    "",
-    "Rules:",
-    "- Preserve the tester's order exactly.",
-    "- Combine repeated identical actions using repeat.",
-    "- Put an expectation on the step after which it should be checked.",
-    "- If the tester only states an expectation, use observe.",
-    "- Every explicit expectation must appear in exactly one step.",
-    "- Use pauseMs 350 unless the tester requests another delay.",
-    "- Do not invent expectations or actions.",
-    "",
-    "Tester description:",
-    description.trim(),
-  ].join("\n");
-}
+export const PLAN_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  title: "VegaProbe plan",
+  type: "object",
+  required: ["name", "steps"],
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", minLength: 1 },
+    description: { type: "string" },
+    steps: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+      items: {
+        type: "object",
+        required: ["action"],
+        additionalProperties: false,
+        properties: {
+          action: { enum: VEGA_ACTIONS },
+          repeat: { type: "integer", minimum: 1, maximum: 50, default: 1 },
+          pauseMs: { type: "integer", minimum: 0, maximum: 10_000, default: 350 },
+          expect: { type: "string", minLength: 1 },
+        },
+      },
+    },
+  },
+};
 
-export function parseTestPlan(output) {
-  const value = extractJson(output);
+export const EVALUATION_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  title: "VegaProbe evaluation",
+  type: "object",
+  required: ["results"],
+  additionalProperties: false,
+  properties: {
+    results: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["step", "passed", "reason"],
+        additionalProperties: false,
+        properties: {
+          step: { type: "integer", minimum: 1 },
+          passed: { type: "boolean" },
+          reason: { type: "string", minLength: 1 },
+          observed: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+export function parseTestPlan(input) {
+  const value = parseJsonInput(input);
   assertObject(value, "The test plan must be a JSON object.");
+  assertOnlyKeys(value, ["name", "description", "steps"], "The test plan");
+
+  if (typeof value.name !== "string" || !value.name.trim()) {
+    throw new Error("The test plan must include a non-empty name.");
+  }
 
   const rawSteps = value.steps;
   if (!Array.isArray(rawSteps) || rawSteps.length === 0 || rawSteps.length > 100) {
@@ -53,6 +80,7 @@ export function parseTestPlan(output) {
 
   const steps = rawSteps.map((rawStep, index) => {
     assertObject(rawStep, `Step ${index + 1} must be an object.`);
+    assertOnlyKeys(rawStep, ["action", "repeat", "pauseMs", "expect"], `Step ${index + 1}`);
     if (!ACTION_SET.has(rawStep.action)) {
       throw new Error(`Step ${index + 1} has unsupported action: ${String(rawStep.action)}`);
     }
@@ -76,51 +104,36 @@ export function parseTestPlan(output) {
     throw new Error("At least one step must include an expectation.");
   }
 
-  const name = typeof value.name === "string" && value.name.trim()
-    ? value.name.trim()
-    : "Vega natural-language test";
-  return { name, steps };
+  const name = value.name.trim();
+  const description = typeof value.description === "string" && value.description.trim()
+    ? value.description.trim()
+    : undefined;
+  return { name, ...(description ? { description } : {}), steps };
 }
 
-export function buildEvaluationPrompt(description, checkpoints) {
-  const evidence = checkpoints.map((checkpoint) => ({
-    step: checkpoint.step,
-    expectation: checkpoint.expect,
-    screenshot: checkpoint.screenshot,
-    uiSummary: checkpoint.summary,
-  }));
-
-  return [
-    "You are a strict TV application test oracle.",
-    "Judge each expectation using both the screenshot and the Vega UI context summary.",
-    "You MUST use the Read tool to inspect every screenshot listed below.",
-    "Treat UI context as authoritative for focus identity and the screenshot as authoritative for visible appearance.",
-    "If evidence is missing, ambiguous, or contradicts the expectation, fail that expectation.",
-    "Return only one JSON object and no markdown.",
-    "",
-    "Output contract:",
-    '{"results":[{"step":1,"passed":true,"reason":"concise evidence","observed":"what was observed"}],"overallPassed":true}',
-    "",
-    "Original tester description:",
-    description.trim(),
-    "",
-    "Checkpoints:",
-    JSON.stringify(evidence, null, 2),
-  ].join("\n");
-}
-
-export function parseEvaluation(output) {
-  const value = extractJson(output);
+export function parseEvaluation(input) {
+  const value = parseJsonInput(input);
   assertObject(value, "The evaluation must be a JSON object.");
+  assertOnlyKeys(value, ["results"], "The evaluation");
   if (!Array.isArray(value.results)) {
     throw new Error("The evaluation must include a results array.");
   }
 
+  const seenSteps = new Set();
   const results = value.results.map((rawResult, index) => {
     assertObject(rawResult, `Evaluation result ${index + 1} must be an object.`);
+    assertOnlyKeys(
+      rawResult,
+      ["step", "passed", "reason", "observed"],
+      `Evaluation result ${index + 1}`
+    );
     if (!Number.isInteger(rawResult.step) || rawResult.step < 1) {
       throw new Error(`Evaluation result ${index + 1} has an invalid step.`);
     }
+    if (seenSteps.has(rawResult.step)) {
+      throw new Error(`Evaluation step ${rawResult.step} appears more than once.`);
+    }
+    seenSteps.add(rawResult.step);
     if (typeof rawResult.passed !== "boolean") {
       throw new Error(`Evaluation result ${index + 1} must include passed=true or false.`);
     }
@@ -137,12 +150,7 @@ export function parseEvaluation(output) {
     };
   });
 
-  return {
-    results,
-    overallPassed: typeof value.overallPassed === "boolean"
-      ? value.overallPassed
-      : results.every((result) => result.passed),
-  };
+  return { results, overallPassed: results.every((result) => result.passed) };
 }
 
 export function extractJson(output) {
@@ -160,11 +168,23 @@ export function extractJson(output) {
   const end = trimmed.lastIndexOf("}");
   if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
 
-  throw new Error("Agent response did not contain a JSON object.");
+  throw new Error("Input did not contain a JSON object.");
+}
+
+function parseJsonInput(input) {
+  return typeof input === "string" ? extractJson(input) : input;
 }
 
 function assertObject(value, message) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(message);
+  }
+}
+
+function assertOnlyKeys(value, allowed, label) {
+  const allowedSet = new Set(allowed);
+  const unexpected = Object.keys(value).filter((key) => !allowedSet.has(key));
+  if (unexpected.length > 0) {
+    throw new Error(`${label} contains unsupported field${unexpected.length === 1 ? "" : "s"}: ${unexpected.join(", ")}.`);
   }
 }

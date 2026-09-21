@@ -1,7 +1,7 @@
 {
   "name": "vega-probe",
-  "version": "0.1.0",
-  "description": "Agent-driven natural-language test runner for the Vega Virtual Device",
+  "version": "0.2.0",
+  "description": "Agent-neutral control and test evidence for the Vega Virtual Device",
   "type": "module",
   "bin": {
     "vega-probe": "bin/vega-probe.mjs"

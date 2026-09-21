@@ -1,74 +1,57 @@
 ---
 name: vega-probe
-description: Plan and run natural-language TV navigation and UI expectation tests against a running Vega Virtual Device using the local vega-probe CLI. Use for Vega VDA focus, navigation, screenshots, and observable UI checks; do not use for Android TV devices.
+description: Control and inspect a Vega Virtual Device with local screenshots and UI context, or execute and evaluate deterministic TV navigation plans. Use for Vega VDA focus, navigation, and visible UI checks; do not use for Android TV devices.
 ---
 
 # VegaProbe
 
-Use `vega-probe` to convert a natural-language scenario into bounded remote
-actions, execute those actions against a Vega Virtual Device, capture
-screenshots and UI context, and report expectation verdicts.
-
-The calling agent may use any model. `vega-probe` currently invokes the locally
-configured Claude CLI internally for planning and evidence evaluation. Omit
-`--model` unless the user requests a specific Claude model.
-
-## Consent
-
-Before the first invocation, tell the user that:
-
-- planning sends the test description to the configured Claude service;
-- execution sends screenshots and summarized Vega UI context for evaluation;
-- monetary cost is tracked but uncapped.
-
-Use `--allow-external-agent` only after the user explicitly approves this data
-transfer. Do not run tests containing sensitive screens unless the user
-confirms that the configured service and data-handling policy are appropriate.
-
-## Workflow
+Use `vega-probe` as the local device-and-evidence layer. VegaProbe makes no
+model calls: the current agent plans the actions and evaluates the results.
 
 From this package, use `node ./bin/vega-probe.mjs`; use `vega-probe` when the
 package binary is installed or linked.
 
-First create a plan without touching the device:
+## Choose a mode
+
+For adaptive navigation, observe first and send small bounded inputs:
 
 ```sh
-vega-probe --allow-external-agent --plan --json \
-  --out ./vega-probe-results/<test-name>-plan \
-  "<natural-language scenario>"
+vega-probe observe --out ./vega-probe-results/<name>-observe --json
+vega-probe input left --repeat 2 --pause-ms 500 \
+  --out ./vega-probe-results/<name>-input --json
 ```
 
-Read the JSON result and `plan.json`. Show the user the ordered actions,
-expectations, optional device selection, and accumulated cost. Wait for
-confirmation before executing the device actions.
+Read the screenshot and UI-context paths returned in `evidence.json`. Continue
+only while the observed state supports the next action.
 
-Then run the approved scenario with a separate output directory:
+For a repeatable scenario, inspect the contract with `vega-probe schema
+--json`, write a plan containing at least one `expect`, then run it:
 
 ```sh
-vega-probe --allow-external-agent --json \
-  --out ./vega-probe-results/<test-name>-run \
-  "<natural-language scenario>"
+vega-probe run ./plan.json --out ./vega-probe-results/<name>-run --json
 ```
 
-For a long scenario, prefer `--file <path>`. Add `--device <serial>` only when
-a particular VDA is required. Supported actions are `up`, `down`, `left`,
-`right`, `select`, `back`, `home`, `wait`, and `observe`.
+Inspect every expected checkpoint. Treat UI context as authoritative for focus
+identity and the screenshot as authoritative for visible appearance. If they
+are out of sync during a transition, wait and use `observe` for a settled
+capture.
 
-After execution, report:
+Write one verdict per expected step and finalize it:
 
-- overall pass or failure and each evaluation reason;
-- token usage and monetary cost;
-- the paths to `report.md`, screenshots, and UI context JSON;
-- any environment error without silently changing the device or scenario.
+```sh
+vega-probe report ./vega-probe-results/<name>-run \
+  --evaluation ./evaluation.json --json
+```
 
-## Exit Codes
+Report pass/fail reasons and link the screenshot and context evidence.
 
-- `0`: passed, or plan generated;
-- `1`: invalid input;
-- `2`: test execution or agent evaluation failed;
-- `3`: Vega CLI, VDA, Automation Toolkit, or another environment requirement
-  is unavailable.
+## Constraints
 
-If the command exits `3`, report the missing requirement and stop. If it exits
-`2`, inspect the JSON error or generated report and explain the failed
-expectation; do not rewrite the user's scenario or rerun it without approval.
+- Supported plan actions are `up`, `down`, `left`, `right`, `select`, `back`,
+  `home`, `wait`, and `observe`.
+- `home` is the system remote Home key. Use D-pad navigation when the user
+  means an in-app Home screen.
+- Use `--device <serial>` only when a particular VDA is required.
+- Do not silently change the user's scenario, device, or expected outcome.
+- On exit `3`, report the missing environment requirement and stop.
+- On exit `2`, report the failed verdict; do not rerun without user approval.

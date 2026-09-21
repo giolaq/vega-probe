@@ -1,21 +1,19 @@
 # VegaProbe
 
-An agent-driven natural-language test runner for the Vega Virtual Device. It
-does not import, invoke, or depend on TV Build.
+VegaProbe is an agent-neutral control and test-evidence CLI for the Vega
+Virtual Device. It sends bounded remote inputs, captures screenshots and Vega
+UI context, and turns verdicts from the calling agent into a test report.
 
-The tester describes remote actions and observable expectations in plain
-language. An agent converts the description into bounded input steps. The
-runner sends those steps through Vega's Automation Toolkit, captures a
-screenshot and UI tree after each step, and asks the agent to judge each
-expectation.
+VegaProbe does not select or invoke a model. Any calling agent can use the same
+local JSON interface and evaluate the evidence itself.
 
 ## Requirements
 
 - Node.js 20 or newer.
 - Vega SDK with a running Vega Virtual Device.
-- An authenticated Claude Code CLI.
 
-The package has no npm runtime dependencies.
+The package has no npm runtime dependencies and makes no external-service
+calls.
 
 ## Install
 
@@ -31,140 +29,184 @@ You can now run `vega-probe` from any project. Without linking:
 node ./bin/vega-probe.mjs --help
 ```
 
-## Run a test
+## Agent workflow
+
+Start by inspecting the machine-readable contracts:
 
 ```sh
-vega-probe \
-  --allow-external-agent \
-  "Move right twice. Expect Test & Debug to be focused."
+vega-probe schema --json
 ```
 
-Longer scenarios can be ordinary text files:
-
-```text
-Start with Home focused.
-Move right twice.
-Expect Test & Debug to be focused.
-Press OK.
-Expect the Test & Debug screen to be visible.
-```
+Observe the current app before deciding how to navigate:
 
 ```sh
-vega-probe --allow-external-agent --file ./scenario.txt
+vega-probe observe --json --out ./vega-probe-results/home-observe
 ```
 
-The description can also be piped over stdin:
+The calling agent reads the returned screenshot and UI-context paths. It can
+then navigate adaptively:
 
 ```sh
-cat scenario.txt | vega-probe --allow-external-agent
+vega-probe input left --repeat 3 --pause-ms 500 --json \
+  --out ./vega-probe-results/home-input
 ```
 
-## Inspect before execution
+For a repeatable test, the calling agent writes a deterministic plan:
 
-`--plan` asks the agent to create the bounded JSON plan but does not connect to
-the simulator:
+```json
+{
+  "name": "Move to Home",
+  "description": "Navigate to the current app's Home tile.",
+  "steps": [
+    {
+      "action": "left",
+      "repeat": 3,
+      "pauseMs": 500,
+      "expect": "Home is focused and the Home content is visible."
+    }
+  ]
+}
+```
+
+Run it:
 
 ```sh
-vega-probe --allow-external-agent --file ./scenario.txt --plan
+vega-probe run ./plan.json --json \
+  --out ./vega-probe-results/home-run
 ```
 
-Agent monetary cost is tracked but not capped.
+`run` executes the plan and writes `evidence.json`, screenshots, and raw UI
+context. It does not claim that expectations passed. The calling agent must
+inspect both evidence sources and write its verdict:
 
-## Use from an agent
+```json
+{
+  "results": [
+    {
+      "step": 1,
+      "passed": true,
+      "reason": "The UI context identifies tile-home as focused and the screenshot shows Home content.",
+      "observed": "Home focused"
+    }
+  ]
+}
+```
 
-`vega-probe` exposes a machine-readable CLI that can be called by Codex, Claude,
-or another outer agent. The outer agent does not need to use a particular
-model. The current implementation uses the locally configured Claude CLI
-internally to translate the test description and evaluate captured evidence.
+Finalize the report:
 
-Model selection is optional. Omit `--model` to use the Claude CLI's configured
-default, or pass `--model <name>` when a specific model is required.
+```sh
+vega-probe report ./vega-probe-results/home-run \
+  --evaluation ./evaluation.json --json
+```
 
-An agent should use this workflow:
+This writes `result.json` and `report.md`. A failed verdict exits with code `2`.
 
-1. Explain that the test description is sent to the configured Claude service
-   during planning, and screenshots plus UI context are sent during evaluation.
-   Do not add `--allow-external-agent` until the human has approved that data
-   transfer.
-2. Generate and inspect a plan without touching the device:
+## Commands
 
-   ```sh
-   vega-probe --allow-external-agent --plan --json \
-     --out ./vega-probe-results/my-test-plan \
-     "Move right twice. Expect Test & Debug to be focused."
-   ```
+### `schema`
 
-3. Show the human the generated steps, selected device if applicable, and
-   accumulated agent cost. State that monetary cost is tracked but uncapped.
-4. After the human confirms execution, run the test with a separate output
-   directory:
+Prints supported actions and the plan and evaluation JSON Schemas.
 
-   ```sh
-   vega-probe --allow-external-agent --json \
-     --out ./vega-probe-results/my-test-run \
-     "Move right twice. Expect Test & Debug to be focused."
-   ```
+```sh
+vega-probe schema --json
+```
 
-5. Report the pass/fail result, evaluation reasons, agent usage, and paths to
-   `report.md`, screenshots, and UI context artifacts.
+### `observe`
 
-Use `--file <path>` for longer scenarios and `--device <serial>` only when the
-human or environment requires a specific VDA. Exit codes are stable: `0` means
-success, `1` invalid input, `2` test or evaluation failure, and `3` an
-environment failure.
+Captures the current screen without sending input.
 
-See [`SKILL.md`](./SKILL.md) for reusable agent instructions.
+```sh
+vega-probe observe [--pause-ms <ms>] [--out <path>] [--json]
+```
 
-## Data disclosure
+### `input`
 
-The Claude CLI sends the test description to its configured service to create
-the plan. During evaluation it also receives the captured screenshot and a
-summary of the Vega UI context. The runner refuses to make those calls unless
-you pass `--allow-external-agent`.
+Sends one supported remote input, optionally repeated, then captures evidence.
 
-Do not use that flag with sensitive screens unless your configured agent and
-data-handling policy permit it.
+```sh
+vega-probe input <action> [--repeat <n>] [--pause-ms <ms>] \
+  [--out <path>] [--json]
+```
 
-## Artifacts
+Input actions are `up`, `down`, `left`, `right`, `select`, `back`, and `home`.
+The `home` action is the system remote Home button. Navigate with D-pad inputs
+when the user means a Home screen inside the current app.
 
-Each run writes:
+### `run`
 
-- `description.txt`: original tester language.
-- `plan.json`: deterministic remote actions and expectations.
+Executes a JSON plan and captures every step:
+
+```sh
+vega-probe run <plan.json> [--out <path>] [--json]
+```
+
+Plan actions also support `wait` and `observe`. Plans contain 1–100 steps;
+`repeat` is limited to 1–50 and `pauseMs` to 0–10000.
+
+### `report`
+
+Validates calling-agent verdicts and writes the final result:
+
+```sh
+vega-probe report <run-dir> --evaluation <evaluation.json> [--json]
+```
+
+Every step containing `expect` receives exactly one verdict. Missing verdicts
+fail the test; duplicate or unexpected step numbers are rejected.
+
+## Common options
+
+- `--device <serial>` selects a VDA device; the first connected device is used
+  by default.
+- `--vega <path>` selects the Vega CLI. `VEGA_PATH` is also supported.
+- `--out <path>` chooses the artifact directory.
+- `--json` emits one machine-readable JSON object on stdout.
+
+## Evidence
+
+Device commands write:
+
+- `evidence.json`: normalized command, device, checkpoints, and artifact paths.
+- `plan.json`: normalized plan for a `run`.
 - `NN-action.png`: framebuffer captured directly from Vega.
 - `NN-action-context.json`: raw Vega accessibility/UI context.
-- `result.json`: machine-readable verdicts and usage.
-- `report.md`: human-readable results and evidence.
 
-Use `--out <path>` to choose the artifact directory and `--json` for
-machine-readable CLI output.
+`report` adds:
+
+- `result.json`: machine-readable pass/fail result and verdicts.
+- `report.md`: human-readable report with evidence paths.
+
+Treat UI context as authoritative for focus identity and the screenshot as
+authoritative for visible appearance. If they appear out of sync during an
+animation, wait and use `observe` to capture a settled state.
 
 ## Device control
 
-The runner:
+VegaProbe:
 
 1. Discovers the VDA device through `vega exec vda devices`.
 2. Enables `/tmp/automation-toolkit.enable`.
 3. Forwards the toolkit's port `8383` to a temporary localhost port.
 4. Calls `injectInputKeyEvent`, `getScreenContext`, and `takeScreenshot`.
-5. Removes its port forward after the test.
+5. Removes its port forward after the command.
 
-This does not use `osascript` and does not require the simulator window to be
+It does not use `osascript` and does not require the simulator window to be
 focused.
 
-Supported actions are `up`, `down`, `left`, `right`, `select`, `back`, `home`,
-`wait`, and `observe`.
+## Data handling
 
-## Configuration
+VegaProbe makes no model or external-service calls. Screenshots and UI context
+remain local unless the calling agent's own environment transmits them. Apply
+that agent's data-handling policy when testing sensitive screens.
 
-```sh
-vega-probe --allow-external-agent \
-  --device emulator-5554 --model claude-sonnet-4-6 \
-  --vega /path/to/vega --claude /path/to/claude \
-  "Move left. Expect Home to be focused."
-```
+## Exit codes
 
-You can also set `VEGA_PATH` and `CLAUDE_PATH`.
+| Code | Meaning |
+| --- | --- |
+| `0` | Command succeeded, or evaluated test passed |
+| `1` | Invalid command, plan, or evaluation |
+| `2` | Evaluated test failed |
+| `3` | Vega CLI, VDA, or Automation Toolkit environment failure |
 
 ## Verify the package
 
